@@ -1,51 +1,48 @@
 import torch
-import numpy as np
+import torch.nn as nn
 
-
-def found(model, img: torch.Tensor, limit: float = 0.07) -> torch.Tensor:
-    """ Calculate the watermark to MSE
-
-    This method impements a simplify version of FOUND specifically targetting the 
-    VGG13 model. The method adds a Gaussian noise to the base images, and slowly increases
-    the noise until it hits the set limit for maximum loss that doesn't affect image visuals.
-
-    Formula:
-    
-        L_{MSE} = MSE( \sum_{i=1}^{N} E_i(X) , \sum_{i=1}^{N} E_i(Xˆ))
-
-    Args:
-    
-        model: Custom pytorch model , or using the custom models module
-        img: A tensor of shape (Batch , Channel, Height, Width)
-        limit: The perturbation limit that doesn't influence visuals
-        
-    Returns:
-        str: The refined response that reached 8/10 score,
-            or the last refined response if no acceptable score is met.
+def found_vgg13(model, img: torch.Tensor, eps: float = 0.07, steps: int = 10, lr: float = 0.01) -> torch.Tensor:
     """
-    # Check available device
+    Args:
+        model: Pytorch model
+        img: tensor of shape (Batch, Channel, Height, Width), scaled [0, 1].
+        eps: The maximum allowed pixel perturbation (L-infinity bounding box).
+        steps: Number of optimization iterations
+        lr: Step size for the gradient update.
+    """
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    model = model.to(device).eval()
     
-    # Load img to gpu
+    for param in model.parameters():
+        param.requires_grad = False
+        
     img = img.to(device)
-    base_features = model.extract_features(img)
     
-    # calculate delta from gaussian noie
-    x = torch.linspace(-2, 1, 100)
-    noises = 1/np.sqrt(2*np.pi) * np.exp(-x**2 / 2)
-    
-    for noise in noises:
-        # Add noise to original image
-        watermarked_img = img + noise
-        
-        watermarked_features = model.extract_features(watermarked_img)
-    
-        # Calculate MSE
-        loss = torch.mean((base_features - watermarked_features)**2)
-        
-        if loss >= limit:
-            return watermarked_img.cpu()
+    base_features = model.extract_features(img).detach()
 
-    # If adding noise exceeds limitw
-    return img
+    # Initialize delta (the adversarial watermark) as zeros
+    delta = torch.zeros_like(img, requires_grad=True, device=device)
+
+    # Optimizer to update delta perturbation 
+    optimizer = torch.optim.Adam([delta], lr=lr)
+    
+    for step in range(steps):
+        optimizer.zero_grad()
+        
+        perturbed_img = torch.clamp(img + delta, 0.0, 1.0)
+        
+        perturbed_features = model.extract_features(perturbed_img)
+        
+        # Negative sign because pytorch optimizers minimize loss
+        loss = -torch.mean((base_features - perturbed_features) ** 2)
+        
+        loss.backward()
+        optimizer.step()
+        
+        # limit constraint (L-infinity projection)
+        with torch.no_grad():
+            delta.data = torch.clamp(delta.data, -eps, eps)
+            
+    final_disrupted_img = torch.clamp(img + delta, 0.0, 1.0)
+    return final_disrupted_img.cpu()
     
